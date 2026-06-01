@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/krishnakoushik225/helix/internal/config"
+	"github.com/krishnakoushik225/helix/internal/providers"
 )
 
 func main() {
@@ -36,6 +37,8 @@ func main() {
 		Str("port", cfg.Port).
 		Msg("starting helix")
 
+	ollama := providers.NewOllamaProvider(cfg.OllamaBaseURL)
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -43,12 +46,14 @@ func main() {
 
 	r.Get("/health", healthHandler)
 	r.Get("/ready", readyHandler)
+	r.Post("/v1/chat", chatHandler(ollama))
 
 	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      r,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		Addr:        ":" + cfg.Port,
+		Handler:     r,
+		ReadTimeout: 10 * time.Second,
+		// WriteTimeout must be generous enough for LLM completions.
+		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -82,8 +87,39 @@ func readyHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
+func chatHandler(p providers.Provider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req providers.Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+			return
+		}
+		if len(req.Messages) == 0 {
+			writeError(w, http.StatusBadRequest, "messages must not be empty")
+			return
+		}
+		if req.Stream {
+			writeError(w, http.StatusNotImplemented, "streaming not yet supported on this endpoint")
+			return
+		}
+
+		resp, err := p.Complete(r.Context(), &req)
+		if err != nil {
+			log.Error().Err(err).Str("provider", p.Name()).Msg("inference failed")
+			writeError(w, http.StatusBadGateway, "provider error: "+err.Error())
+			return
+		}
+
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
 }
