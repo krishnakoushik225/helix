@@ -15,6 +15,7 @@ import (
 
 	"github.com/krishnakoushik225/helix/internal/config"
 	"github.com/krishnakoushik225/helix/internal/providers"
+	"github.com/krishnakoushik225/helix/internal/stream"
 )
 
 func main() {
@@ -47,6 +48,7 @@ func main() {
 	r.Get("/health", healthHandler)
 	r.Get("/ready", readyHandler)
 	r.Post("/v1/chat", chatHandler(ollama))
+	r.Post("/v1/chat/stream", streamChatHandler(ollama))
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
@@ -111,6 +113,63 @@ func chatHandler(p providers.Provider) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func streamChatHandler(p providers.Provider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req providers.Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+			return
+		}
+		if len(req.Messages) == 0 {
+			writeError(w, http.StatusBadRequest, "messages must not be empty")
+			return
+		}
+
+		// Child context: cancel() is called on handler return, which stops the
+		// forwarding goroutine and the provider goroutine regardless of why we exit.
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
+		// Call Stream synchronously so a connection error returns a clean JSON 502
+		// before we commit to SSE headers.
+		providerCh, err := p.Stream(ctx, &req)
+		if err != nil {
+			log.Error().Err(err).Str("provider", p.Name()).Msg("stream init failed")
+			writeError(w, http.StatusBadGateway, "provider error: "+err.Error())
+			return
+		}
+
+		// Buffer 32 chunks between the provider and the proxy so a slow client
+		// doesn't stall the provider's SSE reader.
+		ch := make(chan providers.StreamChunk, 32)
+
+		// Forward from providerCh to ch. Stops when providerCh is closed (normal
+		// end-of-stream), or when ctx is cancelled (client disconnect or error).
+		go func() {
+			defer close(ch)
+			for {
+				select {
+				case chunk, ok := <-providerCh:
+					if !ok {
+						return
+					}
+					select {
+					case ch <- chunk:
+					case <-ctx.Done():
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
+		if err := stream.Proxy(ctx, w, ch); err != nil {
+			log.Warn().Err(err).Str("provider", p.Name()).Msg("stream ended")
+		}
 	}
 }
 
