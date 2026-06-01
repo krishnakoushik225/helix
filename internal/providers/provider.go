@@ -4,12 +4,13 @@ import "context"
 
 // Message represents a single turn in a conversation.
 type Message struct {
-	Role    string `json:"role"`    // "user" | "assistant" | "system"
+	Role    string `json:"role"` // "user" | "assistant" | "system"
 	Content string `json:"content"`
 }
 
 // Request is the normalized inference request sent to any provider.
 type Request struct {
+	Provider    string    `json:"provider,omitempty"` // "ollama" | "anthropic" | "openai"; defaults to "ollama"
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
@@ -19,19 +20,19 @@ type Request struct {
 
 // Response is the normalized inference response returned by any provider.
 type Response struct {
-	ID               string  `json:"id"`
-	Model            string  `json:"model"`
-	Content          string  `json:"content"`
-	InputTokens      int     `json:"input_tokens"`
-	OutputTokens     int     `json:"output_tokens"`
-	FinishReason     string  `json:"finish_reason"`
+	ID           string `json:"id"`
+	Model        string `json:"model"`
+	Content      string `json:"content"`
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	FinishReason string `json:"finish_reason"`
 }
 
 // StreamChunk is a single delta emitted during a streaming response.
 type StreamChunk struct {
-	ID      string `json:"id"`
-	Delta   string `json:"delta"`
-	Done    bool   `json:"done"`
+	ID    string `json:"id"`
+	Delta string `json:"delta"`
+	Done  bool   `json:"done"`
 }
 
 // Provider is the interface that every LLM backend must satisfy.

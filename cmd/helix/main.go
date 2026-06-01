@@ -38,7 +38,11 @@ func main() {
 		Str("port", cfg.Port).
 		Msg("starting helix")
 
-	ollama := providers.NewOllamaProvider(cfg.OllamaBaseURL)
+	registry := map[string]providers.Provider{
+		"ollama":    providers.NewOllamaProvider(cfg.OllamaBaseURL),
+		"anthropic": providers.NewAnthropicProvider(cfg.AnthropicAPIKey),
+		"openai":    providers.NewOpenAIProvider(cfg.OpenAIAPIKey),
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -47,8 +51,8 @@ func main() {
 
 	r.Get("/health", healthHandler)
 	r.Get("/ready", readyHandler)
-	r.Post("/v1/chat", chatHandler(ollama))
-	r.Post("/v1/chat/stream", streamChatHandler(ollama))
+	r.Post("/v1/chat", chatHandler(registry))
+	r.Post("/v1/chat/stream", streamChatHandler(registry))
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
@@ -89,7 +93,7 @@ func readyHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-func chatHandler(p providers.Provider) http.HandlerFunc {
+func chatHandler(registry map[string]providers.Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req providers.Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -101,7 +105,13 @@ func chatHandler(p providers.Provider) http.HandlerFunc {
 			return
 		}
 		if req.Stream {
-			writeError(w, http.StatusNotImplemented, "streaming not yet supported on this endpoint")
+			writeError(w, http.StatusNotImplemented, "use /v1/chat/stream for streaming")
+			return
+		}
+
+		p, ok := resolveProvider(registry, req.Provider)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unknown provider: "+req.Provider)
 			return
 		}
 
@@ -116,7 +126,7 @@ func chatHandler(p providers.Provider) http.HandlerFunc {
 	}
 }
 
-func streamChatHandler(p providers.Provider) http.HandlerFunc {
+func streamChatHandler(registry map[string]providers.Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req providers.Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -125,6 +135,12 @@ func streamChatHandler(p providers.Provider) http.HandlerFunc {
 		}
 		if len(req.Messages) == 0 {
 			writeError(w, http.StatusBadRequest, "messages must not be empty")
+			return
+		}
+
+		p, ok := resolveProvider(registry, req.Provider)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unknown provider: "+req.Provider)
 			return
 		}
 
@@ -171,6 +187,15 @@ func streamChatHandler(p providers.Provider) http.HandlerFunc {
 			log.Warn().Err(err).Str("provider", p.Name()).Msg("stream ended")
 		}
 	}
+}
+
+// resolveProvider looks up a provider by name, defaulting to "ollama".
+func resolveProvider(registry map[string]providers.Provider, name string) (providers.Provider, bool) {
+	if name == "" {
+		name = "ollama"
+	}
+	p, ok := registry[name]
+	return p, ok
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
