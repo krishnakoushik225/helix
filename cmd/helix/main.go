@@ -55,6 +55,19 @@ func main() {
 		log.Warn().Msg("DATABASE_URL not set — request logging disabled")
 	}
 
+	// Rate limiter is optional — skipped if REDIS_URL is not configured.
+	var rateLimiter *authmw.RateLimiter
+	if cfg.RedisURL != "" {
+		rateLimiter, err = authmw.NewRateLimiter(cfg.RedisURL, cfg.RateLimitRPM)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to connect to Redis")
+		}
+		defer rateLimiter.Close()
+		log.Info().Int("rpm", cfg.RateLimitRPM).Msg("rate limiter connected")
+	} else {
+		log.Warn().Msg("REDIS_URL not set — rate limiting disabled")
+	}
+
 	registry := map[string]providers.Provider{
 		"ollama":    providers.NewOllamaProvider(cfg.OllamaBaseURL),
 		"anthropic": providers.NewAnthropicProvider(cfg.AnthropicAPIKey),
@@ -69,9 +82,12 @@ func main() {
 	r.Get("/health", healthHandler)
 	r.Get("/ready", readyHandler)
 
-	// Protected routes — JWT required.
+	// Protected routes — JWT required, then rate-limited per tenant.
 	r.Group(func(r chi.Router) {
 		r.Use(authmw.Require(cfg.JWTSecret))
+		if rateLimiter != nil {
+			r.Use(rateLimiter.Middleware())
+		}
 		r.Post("/v1/chat", chatHandler(registry, database))
 		r.Post("/v1/chat/stream", streamChatHandler(registry, database))
 	})
