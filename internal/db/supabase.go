@@ -75,6 +75,69 @@ func (db *DB) LogRequest(
 	return nil
 }
 
+// ProviderBreakdown aggregates per-provider metrics for the last 24 hours.
+type ProviderBreakdown struct {
+	Requests   int64   `json:"requests"`
+	CostUSD    float64 `json:"cost_usd"`
+	AvgLatency float64 `json:"avg_latency_ms"`
+}
+
+// StatsResult is returned by Stats and drives the /v1/stats endpoint.
+type StatsResult struct {
+	TotalRequests     int64                        `json:"total_requests"`
+	CacheHits         int64                        `json:"cache_hits"`
+	AvgLatencyMs      float64                      `json:"avg_latency_ms"`
+	CostTodayUSD      float64                      `json:"cost_today_usd"`
+	ProviderBreakdown map[string]ProviderBreakdown `json:"provider_breakdown"`
+}
+
+// Stats queries aggregate request statistics from the requests table.
+func (db *DB) Stats(ctx context.Context) (*StatsResult, error) {
+	result := &StatsResult{
+		ProviderBreakdown: make(map[string]ProviderBreakdown),
+	}
+
+	if err := db.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*),
+			COUNT(*) FILTER (WHERE cache_hit = true),
+			COALESCE(AVG(latency_ms), 0),
+			COALESCE(SUM(cost_usd) FILTER (WHERE created_at >= CURRENT_DATE), 0)
+		FROM requests
+	`).Scan(
+		&result.TotalRequests,
+		&result.CacheHits,
+		&result.AvgLatencyMs,
+		&result.CostTodayUSD,
+	); err != nil {
+		return nil, fmt.Errorf("db: stats summary: %w", err)
+	}
+
+	rows, err := db.pool.Query(ctx, `
+		SELECT
+			provider,
+			COUNT(*),
+			COALESCE(SUM(cost_usd), 0),
+			COALESCE(AVG(latency_ms), 0)
+		FROM requests
+		WHERE created_at >= NOW() - INTERVAL '24 hours'
+		GROUP BY provider
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("db: stats breakdown: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var pb ProviderBreakdown
+		if err := rows.Scan(&name, &pb.Requests, &pb.CostUSD, &pb.AvgLatency); err != nil {
+			continue
+		}
+		result.ProviderBreakdown[name] = pb
+	}
+	return result, nil
+}
+
 // GetTenant returns the tenant whose api_key matches the argument.
 // Returns an error wrapping pgx.ErrNoRows if no tenant is found.
 func (db *DB) GetTenant(ctx context.Context, apiKey string) (*Tenant, error) {

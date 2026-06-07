@@ -21,6 +21,7 @@ type Request struct {
 // Response is the normalized inference response returned by any provider.
 type Response struct {
 	ID           string `json:"id"`
+	Provider     string `json:"provider,omitempty"` // set by the router after selection
 	Model        string `json:"model"`
 	Content      string `json:"content"`
 	InputTokens  int    `json:"input_tokens"`
