@@ -42,6 +42,9 @@ func Connect(ctx context.Context, databaseURL string) (*DB, error) {
 // Close releases all connections in the pool.
 func (db *DB) Close() { db.pool.Close() }
 
+// Pool exposes the underlying pgxpool for packages that need direct query access.
+func (db *DB) Pool() *pgxpool.Pool { return db.pool }
+
 // LogRequest inserts one row into the requests table.
 // tenantID may be empty when no auth context is available (inserts NULL).
 // promptTokens and completionTokens may be 0 for streaming responses where

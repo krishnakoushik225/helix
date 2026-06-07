@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -13,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/krishnakoushik225/helix/internal/cache"
 	"github.com/krishnakoushik225/helix/internal/config"
 	"github.com/krishnakoushik225/helix/internal/db"
 	authmw "github.com/krishnakoushik225/helix/internal/middleware"
@@ -55,6 +57,18 @@ func main() {
 		log.Warn().Msg("DATABASE_URL not set — request logging disabled")
 	}
 
+	// Semantic cache is optional — requires CACHE_ENABLED=true, a DB connection,
+	// and a valid OPENAI_API_KEY for embedding generation.
+	var semanticCache cache.Cache
+	if cfg.CacheEnabled && database != nil && cfg.OpenAIAPIKey != "" {
+		semanticCache = cache.NewSemanticCache(database.Pool(), cfg.OpenAIAPIKey)
+		log.Info().
+			Float64("threshold", cfg.CacheSimilarityThreshold).
+			Msg("semantic cache enabled")
+	} else {
+		log.Warn().Msg("semantic cache disabled")
+	}
+
 	// Rate limiter is optional — skipped if REDIS_URL is not configured.
 	var rateLimiter *authmw.RateLimiter
 	if cfg.RedisURL != "" {
@@ -88,8 +102,8 @@ func main() {
 		if rateLimiter != nil {
 			r.Use(rateLimiter.Middleware())
 		}
-		r.Post("/v1/chat", chatHandler(registry, database))
-		r.Post("/v1/chat/stream", streamChatHandler(registry, database))
+		r.Post("/v1/chat", chatHandler(registry, database, semanticCache, cfg.CacheSimilarityThreshold))
+		r.Post("/v1/chat/stream", streamChatHandler(registry, database, semanticCache, cfg.CacheSimilarityThreshold))
 	})
 
 	srv := &http.Server{
@@ -131,7 +145,12 @@ func readyHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-func chatHandler(registry map[string]providers.Provider, database *db.DB) http.HandlerFunc {
+func chatHandler(
+	registry map[string]providers.Provider,
+	database *db.DB,
+	semanticCache cache.Cache,
+	cacheThreshold float64,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req providers.Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -155,6 +174,25 @@ func chatHandler(registry map[string]providers.Provider, database *db.DB) http.H
 			return
 		}
 
+		prompt := buildPrompt(req.Messages)
+
+		// --- cache lookup ---
+		if semanticCache != nil {
+			hit, err := semanticCache.Get(r.Context(), prompt, cacheThreshold)
+			if err != nil {
+				log.Warn().Err(err).Msg("cache lookup failed")
+			} else if hit != nil {
+				w.Header().Set("X-Cache-Hit", "true")
+				writeJSON(w, http.StatusOK, &providers.Response{
+					Model:   hit.Provider,
+					Content: hit.Response,
+				})
+				logUsage(database, tenantID, p.Name(), p.Name(), 0, 0, 0, 0, true)
+				return
+			}
+		}
+
+		// --- provider call ---
 		start := time.Now()
 		resp, err := p.Complete(r.Context(), &req)
 		latencyMs := time.Since(start).Milliseconds()
@@ -167,26 +205,30 @@ func chatHandler(registry map[string]providers.Provider, database *db.DB) http.H
 
 		writeJSON(w, http.StatusOK, resp)
 
-		// Log after response is written so DB latency is invisible to the caller.
-		if database != nil {
-			costUSD := float64(resp.InputTokens)*p.CostPerInputToken(resp.Model) +
-				float64(resp.OutputTokens)*p.CostPerOutputToken(resp.Model)
-
-			logCtx, logCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer logCancel()
-
-			if err := database.LogRequest(logCtx,
-				tenantID, p.Name(), resp.Model,
-				resp.InputTokens, resp.OutputTokens,
-				costUSD, latencyMs, false,
-			); err != nil {
-				log.Warn().Err(err).Str("provider", p.Name()).Msg("failed to log request")
-			}
+		// Async: populate cache so it doesn't add latency.
+		if semanticCache != nil {
+			go func() {
+				cacheCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := semanticCache.Set(cacheCtx, prompt, resp.Content, p.Name()); err != nil {
+					log.Warn().Err(err).Msg("cache set failed")
+				}
+			}()
 		}
+
+		costUSD := float64(resp.InputTokens)*p.CostPerInputToken(resp.Model) +
+			float64(resp.OutputTokens)*p.CostPerOutputToken(resp.Model)
+		logUsage(database, tenantID, p.Name(), resp.Model,
+			resp.InputTokens, resp.OutputTokens, costUSD, latencyMs, false)
 	}
 }
 
-func streamChatHandler(registry map[string]providers.Provider, database *db.DB) http.HandlerFunc {
+func streamChatHandler(
+	registry map[string]providers.Provider,
+	database *db.DB,
+	semanticCache cache.Cache,
+	cacheThreshold float64,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		tenantID := authmw.GetTenantID(r.Context())
@@ -207,6 +249,25 @@ func streamChatHandler(registry map[string]providers.Provider, database *db.DB) 
 			return
 		}
 
+		prompt := buildPrompt(req.Messages)
+
+		// --- cache lookup: synthesise SSE from cached text on hit ---
+		if semanticCache != nil {
+			hit, err := semanticCache.Get(r.Context(), prompt, cacheThreshold)
+			if err != nil {
+				log.Warn().Err(err).Msg("cache lookup failed")
+			} else if hit != nil {
+				w.Header().Set("X-Cache-Hit", "true")
+				synth := make(chan providers.StreamChunk, 2)
+				synth <- providers.StreamChunk{Delta: hit.Response}
+				synth <- providers.StreamChunk{Done: true}
+				close(synth)
+				_ = stream.Proxy(r.Context(), w, synth)
+				logUsage(database, tenantID, p.Name(), p.Name(), 0, 0, 0, time.Since(start).Milliseconds(), true)
+				return
+			}
+		}
+
 		// Child context: cancel() is called on handler return, which stops the
 		// forwarding goroutine and the provider goroutine regardless of why we exit.
 		ctx, cancel := context.WithCancel(r.Context())
@@ -221,12 +282,11 @@ func streamChatHandler(registry map[string]providers.Provider, database *db.DB) 
 			return
 		}
 
-		// Buffer 32 chunks between the provider and the proxy so a slow client
-		// doesn't stall the provider's SSE reader.
+		// Buffer 32 chunks. The forwarding goroutine also accumulates deltas so we
+		// can populate the cache after a successful stream.
 		ch := make(chan providers.StreamChunk, 32)
+		var accum strings.Builder
 
-		// Forward from providerCh to ch. Stops when providerCh is closed (normal
-		// end-of-stream), or when ctx is cancelled (client disconnect or error).
 		go func() {
 			defer close(ch)
 			for {
@@ -234,6 +294,9 @@ func streamChatHandler(registry map[string]providers.Provider, database *db.DB) 
 				case chunk, ok := <-providerCh:
 					if !ok {
 						return
+					}
+					if !chunk.Done && chunk.Delta != "" {
+						accum.WriteString(chunk.Delta)
 					}
 					select {
 					case ch <- chunk:
@@ -246,29 +309,67 @@ func streamChatHandler(registry map[string]providers.Provider, database *db.DB) 
 			}
 		}()
 
-		if err := stream.Proxy(ctx, w, ch); err != nil {
-			log.Warn().Err(err).Str("provider", p.Name()).Msg("stream ended")
+		streamErr := stream.Proxy(ctx, w, ch)
+		if streamErr != nil {
+			log.Warn().Err(streamErr).Str("provider", p.Name()).Msg("stream ended")
 		}
 
-		// Log after stream completes. Token counts are unavailable for streaming
-		// responses (providers don't return per-chunk usage); log zeros for now.
-		if database != nil {
-			latencyMs := time.Since(start).Milliseconds()
-			model := req.Model
-			if model == "" {
-				model = p.Name() + "-default"
-			}
+		latencyMs := time.Since(start).Milliseconds()
 
-			logCtx, logCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer logCancel()
-
-			if err := database.LogRequest(logCtx,
-				tenantID, p.Name(), model,
-				0, 0, 0.0, latencyMs, false,
-			); err != nil {
-				log.Warn().Err(err).Str("provider", p.Name()).Msg("failed to log stream request")
+		// Cache and log only after a clean, complete stream.
+		// When streamErr != nil the goroutine may still be running briefly —
+		// reading accum would race. When nil the goroutine has already closed ch.
+		if streamErr == nil {
+			if semanticCache != nil {
+				if full := accum.String(); full != "" {
+					go func() {
+						cacheCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						if err := semanticCache.Set(cacheCtx, prompt, full, p.Name()); err != nil {
+							log.Warn().Err(err).Msg("cache set failed")
+						}
+					}()
+				}
 			}
 		}
+
+		model := req.Model
+		if model == "" {
+			model = p.Name() + "-default"
+		}
+		logUsage(database, tenantID, p.Name(), model, 0, 0, 0, latencyMs, false)
+	}
+}
+
+// buildPrompt serialises the message list to a canonical JSON string used as
+// the cache key. Encoding the whole array captures conversation context so
+// identical questions with different history don't collide.
+func buildPrompt(messages []providers.Message) string {
+	b, _ := json.Marshal(messages)
+	return string(b)
+}
+
+// logUsage writes one row to the requests table, logging errors as warnings.
+// It is always called after the response is written so DB latency is invisible
+// to the caller. A fresh 5s context insulates it from the request context.
+func logUsage(
+	database *db.DB,
+	tenantID, provider, model string,
+	inputTokens, outputTokens int,
+	costUSD float64,
+	latencyMs int64,
+	cacheHit bool,
+) {
+	if database == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := database.LogRequest(ctx,
+		tenantID, provider, model,
+		inputTokens, outputTokens, costUSD, latencyMs, cacheHit,
+	); err != nil {
+		log.Warn().Err(err).Str("provider", provider).Msg("failed to log request")
 	}
 }
 
