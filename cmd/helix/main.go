@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
 	"github.com/krishnakoushik225/helix/internal/config"
 	"github.com/krishnakoushik225/helix/internal/db"
+	authmw "github.com/krishnakoushik225/helix/internal/middleware"
 	"github.com/krishnakoushik225/helix/internal/providers"
 	"github.com/krishnakoushik225/helix/internal/stream"
 )
@@ -61,14 +62,19 @@ func main() {
 	}
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
+	r.Use(chimw.RequestID)
+	r.Use(chimw.RealIP)
+	r.Use(chimw.Recoverer)
 
 	r.Get("/health", healthHandler)
 	r.Get("/ready", readyHandler)
-	r.Post("/v1/chat", chatHandler(registry, database))
-	r.Post("/v1/chat/stream", streamChatHandler(registry, database))
+
+	// Protected routes — JWT required.
+	r.Group(func(r chi.Router) {
+		r.Use(authmw.Require(cfg.JWTSecret))
+		r.Post("/v1/chat", chatHandler(registry, database))
+		r.Post("/v1/chat/stream", streamChatHandler(registry, database))
+	})
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
@@ -125,6 +131,8 @@ func chatHandler(registry map[string]providers.Provider, database *db.DB) http.H
 			return
 		}
 
+		tenantID := authmw.GetTenantID(r.Context())
+
 		p, ok := resolveProvider(registry, req.Provider)
 		if !ok {
 			writeError(w, http.StatusBadRequest, "unknown provider: "+req.Provider)
@@ -152,7 +160,7 @@ func chatHandler(registry map[string]providers.Provider, database *db.DB) http.H
 			defer logCancel()
 
 			if err := database.LogRequest(logCtx,
-				"", p.Name(), resp.Model,
+				tenantID, p.Name(), resp.Model,
 				resp.InputTokens, resp.OutputTokens,
 				costUSD, latencyMs, false,
 			); err != nil {
@@ -165,6 +173,7 @@ func chatHandler(registry map[string]providers.Provider, database *db.DB) http.H
 func streamChatHandler(registry map[string]providers.Provider, database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		tenantID := authmw.GetTenantID(r.Context())
 
 		var req providers.Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -238,7 +247,7 @@ func streamChatHandler(registry map[string]providers.Provider, database *db.DB) 
 			defer logCancel()
 
 			if err := database.LogRequest(logCtx,
-				"", p.Name(), model,
+				tenantID, p.Name(), model,
 				0, 0, 0.0, latencyMs, false,
 			); err != nil {
 				log.Warn().Err(err).Str("provider", p.Name()).Msg("failed to log stream request")
