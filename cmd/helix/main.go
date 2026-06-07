@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/krishnakoushik225/helix/internal/config"
+	"github.com/krishnakoushik225/helix/internal/db"
 	"github.com/krishnakoushik225/helix/internal/providers"
 	"github.com/krishnakoushik225/helix/internal/stream"
 )
@@ -38,6 +39,21 @@ func main() {
 		Str("port", cfg.Port).
 		Msg("starting helix")
 
+	// DB is optional — skip if DATABASE_URL is not configured.
+	var database *db.DB
+	if cfg.DatabaseURL != "" {
+		dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer dbCancel()
+		database, err = db.Connect(dbCtx, cfg.DatabaseURL)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to connect to database")
+		}
+		defer database.Close()
+		log.Info().Msg("database connected")
+	} else {
+		log.Warn().Msg("DATABASE_URL not set — request logging disabled")
+	}
+
 	registry := map[string]providers.Provider{
 		"ollama":    providers.NewOllamaProvider(cfg.OllamaBaseURL),
 		"anthropic": providers.NewAnthropicProvider(cfg.AnthropicAPIKey),
@@ -51,8 +67,8 @@ func main() {
 
 	r.Get("/health", healthHandler)
 	r.Get("/ready", readyHandler)
-	r.Post("/v1/chat", chatHandler(registry))
-	r.Post("/v1/chat/stream", streamChatHandler(registry))
+	r.Post("/v1/chat", chatHandler(registry, database))
+	r.Post("/v1/chat/stream", streamChatHandler(registry, database))
 
 	srv := &http.Server{
 		Addr:        ":" + cfg.Port,
@@ -93,7 +109,7 @@ func readyHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-func chatHandler(registry map[string]providers.Provider) http.HandlerFunc {
+func chatHandler(registry map[string]providers.Provider, database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req providers.Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -115,7 +131,10 @@ func chatHandler(registry map[string]providers.Provider) http.HandlerFunc {
 			return
 		}
 
+		start := time.Now()
 		resp, err := p.Complete(r.Context(), &req)
+		latencyMs := time.Since(start).Milliseconds()
+
 		if err != nil {
 			log.Error().Err(err).Str("provider", p.Name()).Msg("inference failed")
 			writeError(w, http.StatusBadGateway, "provider error: "+err.Error())
@@ -123,11 +142,30 @@ func chatHandler(registry map[string]providers.Provider) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, resp)
+
+		// Log after response is written so DB latency is invisible to the caller.
+		if database != nil {
+			costUSD := float64(resp.InputTokens)*p.CostPerInputToken(resp.Model) +
+				float64(resp.OutputTokens)*p.CostPerOutputToken(resp.Model)
+
+			logCtx, logCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer logCancel()
+
+			if err := database.LogRequest(logCtx,
+				"", p.Name(), resp.Model,
+				resp.InputTokens, resp.OutputTokens,
+				costUSD, latencyMs, false,
+			); err != nil {
+				log.Warn().Err(err).Str("provider", p.Name()).Msg("failed to log request")
+			}
+		}
 	}
 }
 
-func streamChatHandler(registry map[string]providers.Provider) http.HandlerFunc {
+func streamChatHandler(registry map[string]providers.Provider, database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
 		var req providers.Request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -185,6 +223,26 @@ func streamChatHandler(registry map[string]providers.Provider) http.HandlerFunc 
 
 		if err := stream.Proxy(ctx, w, ch); err != nil {
 			log.Warn().Err(err).Str("provider", p.Name()).Msg("stream ended")
+		}
+
+		// Log after stream completes. Token counts are unavailable for streaming
+		// responses (providers don't return per-chunk usage); log zeros for now.
+		if database != nil {
+			latencyMs := time.Since(start).Milliseconds()
+			model := req.Model
+			if model == "" {
+				model = p.Name() + "-default"
+			}
+
+			logCtx, logCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer logCancel()
+
+			if err := database.LogRequest(logCtx,
+				"", p.Name(), model,
+				0, 0, 0.0, latencyMs, false,
+			); err != nil {
+				log.Warn().Err(err).Str("provider", p.Name()).Msg("failed to log stream request")
+			}
 		}
 	}
 }
