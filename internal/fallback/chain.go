@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	failureThreshold = 5               // failures inside failureWindow to open the circuit
+	failureThreshold = 5                // failures inside failureWindow to open the circuit
 	failureWindow    = 60 * time.Second // sliding window for counting failures
 	cooldownPeriod   = 30 * time.Second // open → half_open transition delay
 )
@@ -22,7 +22,7 @@ const (
 type circuitState int
 
 const (
-	stateClosed   circuitState = iota
+	stateClosed circuitState = iota
 	stateOpen
 	stateHalfOpen
 )
