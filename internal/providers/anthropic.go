@@ -103,7 +103,9 @@ func (a *AnthropicProvider) Complete(ctx context.Context, req *Request) (*Respon
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
@@ -164,7 +166,7 @@ func (a *AnthropicProvider) Stream(ctx context.Context, req *Request) (<-chan St
 	}
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("anthropic: stream status %d: %s", resp.StatusCode, raw)
 	}
 
@@ -172,8 +174,9 @@ func (a *AnthropicProvider) Stream(ctx context.Context, req *Request) (<-chan St
 
 	go func() {
 		defer close(ch)
-		defer resp.Body.Close()
-
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 		// Anthropic SSE format: paired "event: <type>" / "data: <json>" lines.
 		// We track the current event name and act when we see the data line.
 		var msgID string
@@ -247,7 +250,9 @@ func (a *AnthropicProvider) HealthCheck(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("anthropic: health check: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	return nil
 }
 

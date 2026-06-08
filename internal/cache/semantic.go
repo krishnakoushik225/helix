@@ -170,7 +170,9 @@ func (c *SemanticCache) embed(ctx context.Context, text string) ([]float32, erro
 	if err != nil {
 		return nil, fmt.Errorf("embeddings request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
