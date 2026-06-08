@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	corsmw "github.com/go-chi/cors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -116,6 +117,15 @@ func main() {
 	metrics := obs.New()
 
 	r := chi.NewRouter()
+	// CORS must be first so OPTIONS preflight requests receive the correct
+	// Access-Control headers before reaching the JWT auth middleware.
+	r.Use(corsmw.Handler(corsmw.Options{
+		AllowedOrigins: corsOrigins(cfg.CORSAllowedOrigins),
+		AllowedMethods: []string{"GET", "POST", "OPTIONS"},
+		AllowedHeaders: []string{"Authorization", "Content-Type"},
+		ExposedHeaders: []string{"X-Cache-Hit", "Retry-After"},
+		MaxAge:         300,
+	}))
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Recoverer)
@@ -481,6 +491,25 @@ func logUsage(
 	); err != nil {
 		log.Warn().Err(err).Str("provider", provider).Msg("failed to log request")
 	}
+}
+
+// corsOrigins splits a comma-separated origin string and trims whitespace.
+// The defaults are the two standard Vite/React dev-server addresses.
+func corsOrigins(raw string) []string {
+	defaults := []string{"http://localhost:3000", "http://localhost:5173"}
+	if raw == "" {
+		return defaults
+	}
+	var out []string
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	if len(out) == 0 {
+		return defaults
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
