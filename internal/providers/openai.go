@@ -94,7 +94,9 @@ func (o *OpenAIProvider) Complete(ctx context.Context, req *Request) (*Response,
 	if err != nil {
 		return nil, fmt.Errorf("openai: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
@@ -150,7 +152,7 @@ func (o *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Strea
 	}
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("openai: stream status %d: %s", resp.StatusCode, raw)
 	}
 
@@ -158,7 +160,9 @@ func (o *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Strea
 
 	go func() {
 		defer close(ch)
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
@@ -212,7 +216,9 @@ func (o *OpenAIProvider) HealthCheck(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("openai: health check: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	return nil
 }
 

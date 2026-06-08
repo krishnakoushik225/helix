@@ -80,7 +80,11 @@ func main() {
 		if err != nil {
 			log.Fatal().Err(err).Msg("failed to connect to Redis")
 		}
-		defer rateLimiter.Close()
+		defer func() {
+			if err := rateLimiter.Close(); err != nil {
+				log.Warn().Err(err).Msg("failed to close rate limiter")
+			}
+		}()
 		log.Info().Int("rpm", cfg.RateLimitRPM).Msg("rate limiter connected")
 	} else {
 		log.Warn().Msg("REDIS_URL not set — rate limiting disabled")

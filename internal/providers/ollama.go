@@ -93,7 +93,9 @@ func (o *OllamaProvider) Complete(ctx context.Context, req *Request) (*Response,
 	if err != nil {
 		return nil, fmt.Errorf("ollama: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
@@ -149,7 +151,7 @@ func (o *OllamaProvider) Stream(ctx context.Context, req *Request) (<-chan Strea
 	}
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("ollama: stream status %d: %s", resp.StatusCode, raw)
 	}
 
@@ -157,7 +159,9 @@ func (o *OllamaProvider) Stream(ctx context.Context, req *Request) (<-chan Strea
 
 	go func() {
 		defer close(ch)
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
@@ -209,7 +213,9 @@ func (o *OllamaProvider) HealthCheck(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("ollama: health check: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("ollama: health check status %d", resp.StatusCode)
