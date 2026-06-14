@@ -45,6 +45,7 @@ func main() {
 	log.Info().
 		Str("env", cfg.Env).
 		Str("port", cfg.Port).
+		Int("jwt_secret_len", len(cfg.JWTSecret)).
 		Msg("starting helix")
 
 	// DB is optional — skip if DATABASE_URL is not configured.

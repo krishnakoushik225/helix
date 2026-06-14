@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/rs/zerolog/log"
 )
 
 // contextKey is an unexported type for context keys in this package,
@@ -35,8 +36,15 @@ func Require(secret string) func(http.Handler) http.Handler {
 				return
 			}
 
-			token, err := jwt.Parse(strings.TrimPrefix(raw, "Bearer "), keyFunc)
-			if err != nil || !token.Valid {
+			tokenStr := strings.TrimPrefix(raw, "Bearer ")
+			token, err := jwt.Parse(tokenStr, keyFunc)
+			if err != nil {
+				log.Warn().Err(err).Str("path", r.URL.Path).Msg("JWT parse failed")
+				writeUnauthorized(w, "invalid token")
+				return
+			}
+			if !token.Valid {
+				log.Warn().Str("path", r.URL.Path).Msg("JWT invalid")
 				writeUnauthorized(w, "invalid token")
 				return
 			}
