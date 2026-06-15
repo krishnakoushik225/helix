@@ -46,6 +46,11 @@ func main() {
 		Str("env", cfg.Env).
 		Str("port", cfg.Port).
 		Int("jwt_secret_len", len(cfg.JWTSecret)).
+		Bool("database_url_set", cfg.DatabaseURL != "").
+		Bool("redis_url_set", cfg.RedisURL != "").
+		Bool("openai_key_set", cfg.OpenAIAPIKey != "").
+		Bool("cache_enabled", cfg.CacheEnabled).
+		Int("rate_limit_rpm", cfg.RateLimitRPM).
 		Msg("starting helix")
 
 	// DB is optional — skip if DATABASE_URL is not configured.
