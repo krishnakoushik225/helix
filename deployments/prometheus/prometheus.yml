@@ -3,6 +3,7 @@ global:
 
 scrape_configs:
   - job_name: "helix"
+    scheme: "https"
     metrics_path: "/metrics"
     static_configs:
-      - targets: ["host.docker.internal:9898"]
+      - targets: ["helix-serene-dew-2515.fly.dev"]
